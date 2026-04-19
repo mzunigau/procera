@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+*.db
+
+# FastAPI/local runtime
+backend/uploads/
+backend/storage/
+
+# Node/Vite
+node_modules/
+dist/
+*.tsbuildinfo
+
+# Logs and local environment
+*.log
+.env
+.env.*
+
+# Editor/OS
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
