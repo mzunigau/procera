@@ -106,6 +106,7 @@ def test_user_role_assignment_requires_same_company() -> None:
 
         role_response = client.post(
             "/roles",
+            headers={"X-Procera-Company-Id": "company-2"},
             json={
                 "company_id": "company-2",
                 "name": "Auditor",

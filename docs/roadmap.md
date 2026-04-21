@@ -166,25 +166,28 @@ Status legend:
 - [x] Backend tests for critical current flows.
 
 ### Priority 0 - start here
-- [ ] Add backend user/tenant context instead of trusting `company_id` from request bodies.
+- [x] Add backend user/tenant context instead of trusting `company_id` from request bodies.
   - Why: tenant isolation is the foundation for every module.
-  - Start with: a minimal request dependency that resolves current user/company from headers or a temporary development token.
-- [ ] Enforce permission guards on sensitive endpoints.
+  - Current status: implemented with `RequestContext`, `X-Procera-User-Id`, and temporary development header `X-Procera-Company-Id`.
+  - Next hardening: replace development headers with real authentication/session context.
+- [x] Enforce permission guards on sensitive endpoints.
   - Why: users/roles exist, but permissions do not protect project, task, process, document, template, audit, or user actions yet.
-  - Start with: documents, audit logs, templates, role/user management, and task status changes.
-- [ ] Add service-level transaction boundaries for multi-step operations.
+  - Current status: implemented with `require_permission()` on sensitive project, task, process, document, template, audit, user, and role endpoints.
+  - Next hardening: remove the temporary development-context bypass when authentication is implemented.
+- [x] Add service-level transaction boundaries for multi-step operations.
   - Why: process-to-project generation and templates create multiple records; partial failures can leave inconsistent data.
-  - Start with: project creation from process and project creation from template.
-- [ ] Validate user and role references across existing modules.
+  - Current status: project creation from process and project creation from template now commit atomically and roll back partial records on failures.
+- [x] Validate user and role references across existing modules.
   - Why: `owner_user_id`, `assignee_user_id`, `assignee_role_id`, `responsible_user_id`, and `responsible_role_id` can point to missing or cross-company records.
-  - Start with: tasks and process steps, then projects, processes, and documents.
+  - Current status: services validate user and role references against the current company for projects, processes, process steps, tasks, documents, and template instantiation.
 
 ### Priority 1 - do next
-- [ ] Add `ProjectProcessInstance` minimum.
+- [x] Add `ProjectProcessInstance` minimum.
   - Why: current task generation preserves `process_step_id`, but does not explicitly record that a project instantiated a process.
-  - Start with: project_id, process_id, name, status, started_at, completed_at.
+  - Current status: projects can record process instances, generate tasks from an instance, and project creation with `process_id` records an active instance.
 - [ ] Complete audit coverage for core modules.
   - Why: tasks log key events, but projects, processes, documents, templates, users, and roles are incomplete.
+  - Current status: tasks, templates, project create/update, process instance creation, and process-instance task generation write audit logs.
   - Start with: project created/updated, process published, document version created, template instantiated, role assigned.
 - [ ] Add structured template payload validation.
   - Why: `payload_json` is flexible and can fail at runtime when required keys are missing.
@@ -208,6 +211,6 @@ Status legend:
   - Start with: tasks, audit logs, documents, and templates.
 
 ### Recommended next implementation
-Start with **Priority 0: backend user/tenant context plus permission guards**.
+Start with **Priority 1: audit coverage for core modules**.
 
-The current product already has enough feature surface to expose real security and data isolation risks. Stabilizing identity, tenant context, permissions, transactions, and reference validation will reduce rework before adding companies, approvals, evidence, reports, or more workflow features.
+The current product now has tenant context, permission guards, transaction boundaries, reference validation, and process instantiation tracking. Extending audit coverage next will make the operational workflows easier to trust before adding companies, approvals, evidence, reports, or more workflow features.

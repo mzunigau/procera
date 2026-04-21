@@ -18,10 +18,13 @@ class ProcessRepository:
     def get(self, process_id: str) -> Process | None:
         return self.db.get(Process, process_id)
 
-    def create(self, data: ProcessCreate) -> Process:
+    def create(self, data: ProcessCreate, commit: bool = True) -> Process:
         process = Process(**data.model_dump())
         self.db.add(process)
-        self.db.commit()
+        if commit:
+            self.db.commit()
+        else:
+            self.db.flush()
         self.db.refresh(process)
         return process
 

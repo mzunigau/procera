@@ -7,10 +7,14 @@ import type {
   DocumentVersionUploadInput
 } from "./types";
 
+import { getRequestContextHeaders } from "../../shared/api/client";
+
 const API_BASE_URL = "/api";
 
 export async function listDocuments() {
-  const response = await fetch(`${API_BASE_URL}/documents`);
+  const response = await fetch(`${API_BASE_URL}/documents`, {
+    headers: getRequestContextHeaders()
+  });
   if (!response.ok) {
     throw await toError(response);
   }
@@ -18,7 +22,9 @@ export async function listDocuments() {
 }
 
 export async function getDocument(documentId: string) {
-  const response = await fetch(`${API_BASE_URL}/documents/${documentId}`);
+  const response = await fetch(`${API_BASE_URL}/documents/${documentId}`, {
+    headers: getRequestContextHeaders()
+  });
   if (!response.ok) {
     throw await toError(response);
   }
@@ -42,6 +48,7 @@ export async function uploadDocument(input: DocumentUploadInput) {
 
   const response = await fetch(`${API_BASE_URL}/documents/upload`, {
     body: formData,
+    headers: getRequestContextHeaders(),
     method: "POST"
   });
   if (!response.ok) {
@@ -51,7 +58,9 @@ export async function uploadDocument(input: DocumentUploadInput) {
 }
 
 export async function listDocumentVersions(documentId: string) {
-  const response = await fetch(`${API_BASE_URL}/documents/${documentId}/versions`);
+  const response = await fetch(`${API_BASE_URL}/documents/${documentId}/versions`, {
+    headers: getRequestContextHeaders()
+  });
   if (!response.ok) {
     throw await toError(response);
   }
@@ -67,6 +76,7 @@ export async function uploadDocumentVersion(documentId: string, input: DocumentV
 
   const response = await fetch(`${API_BASE_URL}/documents/${documentId}/versions/upload`, {
     body: formData,
+    headers: getRequestContextHeaders(),
     method: "POST"
   });
   if (!response.ok) {
@@ -76,7 +86,9 @@ export async function uploadDocumentVersion(documentId: string, input: DocumentV
 }
 
 export async function listDocumentLinks(documentId: string) {
-  const response = await fetch(`${API_BASE_URL}/documents/${documentId}/links`);
+  const response = await fetch(`${API_BASE_URL}/documents/${documentId}/links`, {
+    headers: getRequestContextHeaders()
+  });
   if (!response.ok) {
     throw await toError(response);
   }

@@ -14,7 +14,9 @@ from app.modules.audit.api import router as audit_router
 from app.modules.process_steps.api import router as process_steps_router
 from app.modules.processes.api import router as processes_router
 from app.modules.projects.api import router as projects_router
+from app.modules.roles.api import router as roles_router
 from app.modules.tasks.api import router as tasks_router
+from app.modules.users.api import router as users_router
 
 
 @contextmanager
@@ -35,6 +37,8 @@ def build_client() -> Generator[TestClient, None, None]:
     app.include_router(projects_router)
     app.include_router(tasks_router)
     app.include_router(audit_router)
+    app.include_router(users_router)
+    app.include_router(roles_router)
 
     def override_get_db() -> Generator[Session, None, None]:
         db = TestingSessionLocal()
@@ -52,6 +56,35 @@ def build_client() -> Generator[TestClient, None, None]:
         Base.metadata.drop_all(bind=engine)
         object.__setattr__(settings, "upload_storage_path", original_upload_storage_path)
         storage_directory.cleanup()
+
+
+def create_user(client: TestClient, email: str = "person@example.com") -> str:
+    response = client.post(
+        "/users",
+        json={
+            "company_id": "company-1",
+            "first_name": "Procera",
+            "last_name": "User",
+            "email": email,
+            "password_hash": "hash",
+            "status": "active",
+        },
+    )
+    assert response.status_code == 201
+    return response.json()["id"]
+
+
+def create_role(client: TestClient, name: str = "Reviewer") -> str:
+    response = client.post(
+        "/roles",
+        json={
+            "company_id": "company-1",
+            "name": name,
+            "description": "Test role",
+        },
+    )
+    assert response.status_code == 201
+    return response.json()["id"]
 
 
 def test_task_crud() -> None:
@@ -262,6 +295,7 @@ def test_task_edit_writes_audit_log() -> None:
 
 def test_task_attachment_reference_crud() -> None:
     with build_client() as client:
+        user_id = create_user(client)
         project_response = client.post(
             "/projects",
             json={
@@ -292,7 +326,7 @@ def test_task_attachment_reference_crud() -> None:
                 "storage_key": "external://documents/supplier-record.pdf",
                 "content_type": "application/pdf",
                 "size_bytes": 2048,
-                "uploaded_by_user_id": "user-1",
+                "uploaded_by_user_id": user_id,
             },
         )
         assert created.status_code == 201
@@ -325,6 +359,7 @@ def test_task_attachment_reference_crud() -> None:
 
 def test_task_attachment_file_upload() -> None:
     with build_client() as client:
+        user_id = create_user(client)
         project_response = client.post(
             "/projects",
             json={
@@ -349,7 +384,7 @@ def test_task_attachment_file_upload() -> None:
 
         uploaded = client.post(
             f"/tasks/{task_id}/attachments/upload",
-            data={"company_id": "company-1", "uploaded_by_user_id": "user-1"},
+            data={"company_id": "company-1", "uploaded_by_user_id": user_id},
             files={"file": ("note.txt", b"attachment content", "text/plain")},
         )
         assert uploaded.status_code == 201
@@ -358,11 +393,12 @@ def test_task_attachment_file_upload() -> None:
         assert attachment["file_name"] == "note.txt"
         assert attachment["content_type"] == "text/plain"
         assert attachment["size_bytes"] == len(b"attachment content")
-        assert attachment["uploaded_by_user_id"] == "user-1"
+        assert attachment["uploaded_by_user_id"] == user_id
 
 
 def test_task_comment_crud() -> None:
     with build_client() as client:
+        user_id = create_user(client)
         project_response = client.post(
             "/projects",
             json={
@@ -389,14 +425,14 @@ def test_task_comment_crud() -> None:
             f"/tasks/{task_id}/comments",
             json={
                 "company_id": "company-1",
-                "author_user_id": "user-1",
+                "author_user_id": user_id,
                 "body": "Please confirm the required evidence before completing this task.",
             },
         )
         assert created.status_code == 201
         comment = created.json()
         assert comment["task_id"] == task_id
-        assert comment["author_user_id"] == "user-1"
+        assert comment["author_user_id"] == user_id
         assert comment["body"] == "Please confirm the required evidence before completing this task."
         assert comment["created_at"] is not None
         assert comment["updated_at"] is not None
@@ -461,6 +497,8 @@ def test_task_comment_requires_text() -> None:
 
 def test_task_can_be_assigned_with_assigned_to() -> None:
     with build_client() as client:
+        user_id = create_user(client)
+        role_id = create_role(client)
         project_response = client.post(
             "/projects",
             json={
@@ -478,25 +516,25 @@ def test_task_can_be_assigned_with_assigned_to() -> None:
                 "company_id": "company-1",
                 "project_id": project_id,
                 "title": "Assign responsible person",
-                "assigned_to": {"type": "user", "id": "user-1"},
+                "assigned_to": {"type": "user", "id": user_id},
             },
         )
         assert created.status_code == 201
         task = created.json()
-        assert task["assigned_to"] == {"type": "user", "id": "user-1"}
-        assert task["assignee_user_id"] == "user-1"
+        assert task["assigned_to"] == {"type": "user", "id": user_id}
+        assert task["assignee_user_id"] == user_id
         assert task["assignee_role_id"] is None
 
         task_id = task["id"]
         reassigned = client.patch(
             f"/tasks/{task_id}",
-            json={"assigned_to": {"type": "role", "id": "role-reviewer"}},
+            json={"assigned_to": {"type": "role", "id": role_id}},
         )
         assert reassigned.status_code == 200
         reassigned_task = reassigned.json()
-        assert reassigned_task["assigned_to"] == {"type": "role", "id": "role-reviewer"}
+        assert reassigned_task["assigned_to"] == {"type": "role", "id": role_id}
         assert reassigned_task["assignee_user_id"] is None
-        assert reassigned_task["assignee_role_id"] == "role-reviewer"
+        assert reassigned_task["assignee_role_id"] == role_id
 
         unassigned = client.patch(f"/tasks/{task_id}", json={"assigned_to": None})
         assert unassigned.status_code == 200
@@ -530,6 +568,34 @@ def test_task_assignment_rejects_mixed_assignment_styles() -> None:
             },
         )
         assert created.status_code == 422
+
+
+def test_task_assignment_rejects_missing_user_reference() -> None:
+    with build_client() as client:
+        project_response = client.post(
+            "/projects",
+            json={
+                "company_id": "company-1",
+                "name": "Operations Project",
+                "status": "active",
+            },
+        )
+        assert project_response.status_code == 201
+        project_id = project_response.json()["id"]
+
+        created = client.post(
+            "/tasks",
+            json={
+                "company_id": "company-1",
+                "project_id": project_id,
+                "title": "Assign missing person",
+                "assigned_to": {"type": "user", "id": "missing-user"},
+            },
+        )
+        assert created.status_code == 400
+        assert created.json()["detail"]["message"] == (
+            "assignee_user_id does not reference an existing user"
+        )
 
 
 def test_task_rejects_invalid_status_transition() -> None:

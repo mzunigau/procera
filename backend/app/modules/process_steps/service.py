@@ -1,6 +1,7 @@
 from fastapi import HTTPException, status
 from sqlalchemy.orm import Session
 
+from app.core.reference_validation import ReferenceValidator
 from app.modules.process_steps.models import ProcessStep, ProcessStepInstruction
 from app.modules.process_steps.repository import (
     ProcessStepInstructionRepository,
@@ -20,6 +21,7 @@ class ProcessStepService:
         self.processes = ProcessRepository(db)
         self.steps = ProcessStepRepository(db)
         self.instructions = ProcessStepInstructionRepository(db)
+        self.reference_validator = ReferenceValidator(db)
 
     def list_process_steps(
         self,
@@ -39,12 +41,30 @@ class ProcessStepService:
 
     def create_process_step(self, data: ProcessStepCreate) -> ProcessStep:
         self._ensure_process_matches_company(data.process_id, data.company_id)
+        self._validate_responsible_refs(
+            company_id=data.company_id,
+            responsible_user_id=data.responsible_user_id,
+            responsible_role_id=data.responsible_role_id,
+        )
         return self.steps.create(data)
 
     def update_process_step(self, process_step_id: str, data: ProcessStepUpdate) -> ProcessStep:
         process_step = self.get_process_step(process_step_id)
         if data.process_id is not None:
             self._ensure_process_matches_company(data.process_id, process_step.company_id)
+        self._validate_responsible_refs(
+            company_id=process_step.company_id,
+            responsible_user_id=(
+                data.responsible_user_id
+                if "responsible_user_id" in data.model_fields_set
+                else None
+            ),
+            responsible_role_id=(
+                data.responsible_role_id
+                if "responsible_role_id" in data.model_fields_set
+                else None
+            ),
+        )
         return self.steps.update(process_step, data)
 
     def delete_process_step(self, process_step_id: str) -> None:
@@ -119,3 +139,20 @@ class ProcessStepService:
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail={"message": "Process step belongs to a different company"},
             )
+
+    def _validate_responsible_refs(
+        self,
+        company_id: str,
+        responsible_user_id: str | None,
+        responsible_role_id: str | None,
+    ) -> None:
+        self.reference_validator.ensure_user_matches_company(
+            responsible_user_id,
+            company_id,
+            "responsible_user_id",
+        )
+        self.reference_validator.ensure_role_matches_company(
+            responsible_role_id,
+            company_id,
+            "responsible_role_id",
+        )

@@ -3,6 +3,7 @@ from typing import Any
 from fastapi import HTTPException, status
 from sqlalchemy.orm import Session
 
+from app.core.reference_validation import ReferenceValidator
 from app.modules.audit.repository import AuditLogRepository
 from app.modules.audit.schemas import AuditLogCreate
 from app.modules.process_steps.repository import ProcessStepRepository
@@ -27,12 +28,14 @@ from app.modules.templates.schemas import (
 
 class TemplateService:
     def __init__(self, db: Session) -> None:
+        self.db = db
         self.templates = TemplateRepository(db)
         self.projects = ProjectRepository(db)
         self.processes = ProcessRepository(db)
         self.process_steps = ProcessStepRepository(db)
         self.tasks = TaskRepository(db)
         self.audit_logs = AuditLogRepository(db)
+        self.reference_validator = ReferenceValidator(db)
 
     def list_templates(
         self,
@@ -156,6 +159,11 @@ class TemplateService:
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail={"message": "Template belongs to a different company"},
             )
+        self.reference_validator.ensure_user_matches_company(
+            data.owner_user_id,
+            data.company_id,
+            "owner_user_id",
+        )
 
         if template.template_type == TemplateType.PROCESS:
             return self._create_project_from_process_template(template, data)
@@ -178,83 +186,108 @@ class TemplateService:
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail={"message": "Template payload does not include a process"},
             )
-
-        process = self.processes.create(
-            ProcessCreate(
-                company_id=data.company_id,
-                name=str(process_payload.get("name") or template.name),
-                code=process_payload.get("code"),
-                objective=process_payload.get("objective"),
-                scope=process_payload.get("scope"),
-                owner_user_id=process_payload.get("owner_user_id"),
-                version_label=process_payload.get("version_label"),
-                status=process_payload.get("status", "draft"),
-            )
+        self.reference_validator.ensure_user_matches_company(
+            process_payload.get("owner_user_id"),
+            data.company_id,
+            "owner_user_id",
         )
 
-        for step_payload in self._payload_list(template.payload_json.get("steps")):
-            self.process_steps.create(
-                ProcessStepCreate(
+        try:
+            process = self.processes.create(
+                ProcessCreate(
                     company_id=data.company_id,
-                    process_id=process.id,
-                    step_order=step_payload["step_order"],
-                    name=step_payload["name"],
-                    description=step_payload.get("description"),
-                    responsible_role_id=step_payload.get("responsible_role_id"),
-                    responsible_user_id=step_payload.get("responsible_user_id"),
-                    instruction_summary=step_payload.get("instruction_summary"),
-                    expected_duration_hours=step_payload.get("expected_duration_hours"),
-                    sla_hours=step_payload.get("sla_hours"),
-                    requires_evidence=step_payload.get("requires_evidence", False),
-                    requires_approval=step_payload.get("requires_approval", False),
-                )
+                    name=str(process_payload.get("name") or template.name),
+                    code=process_payload.get("code"),
+                    objective=process_payload.get("objective"),
+                    scope=process_payload.get("scope"),
+                    owner_user_id=process_payload.get("owner_user_id"),
+                    version_label=process_payload.get("version_label"),
+                    status=process_payload.get("status", "draft"),
+                ),
+                commit=False,
             )
 
-        project = self._create_project(data, process_id=process.id)
-        self._generate_tasks_from_process(project, process.id)
-        self._record_project_audit(
-            "project.created_from_template",
-            project,
-            f"Project created from template {template.name}",
-            {"template_id": template.id, "template_type": template.template_type.value},
-        )
-        return project
+            for step_payload in self._payload_list(template.payload_json.get("steps")):
+                self._validate_process_step_payload_refs(step_payload, data.company_id)
+                self.process_steps.create(
+                    ProcessStepCreate(
+                        company_id=data.company_id,
+                        process_id=process.id,
+                        step_order=step_payload["step_order"],
+                        name=step_payload["name"],
+                        description=step_payload.get("description"),
+                        responsible_role_id=step_payload.get("responsible_role_id"),
+                        responsible_user_id=step_payload.get("responsible_user_id"),
+                        instruction_summary=step_payload.get("instruction_summary"),
+                        expected_duration_hours=step_payload.get("expected_duration_hours"),
+                        sla_hours=step_payload.get("sla_hours"),
+                        requires_evidence=step_payload.get("requires_evidence", False),
+                        requires_approval=step_payload.get("requires_approval", False),
+                    ),
+                    commit=False,
+                )
+
+            project = self._create_project(data, process_id=process.id, commit=False)
+            self._generate_tasks_from_process(project, process.id, commit=False)
+            self._record_project_audit(
+                "project.created_from_template",
+                project,
+                f"Project created from template {template.name}",
+                {"template_id": template.id, "template_type": template.template_type.value},
+                commit=False,
+            )
+            self.db.commit()
+            self.db.refresh(project)
+            return project
+        except Exception:
+            self.db.rollback()
+            raise
 
     def _create_project_from_project_template(
         self,
         template: Template,
         data: ProjectFromTemplateCreate,
     ) -> Project:
-        project = self._create_project(data)
-        for task_payload in self._payload_list(template.payload_json.get("tasks")):
-            self.tasks.create(
-                TaskCreate(
-                    company_id=data.company_id,
-                    project_id=project.id,
-                    process_step_id=task_payload.get("process_step_id"),
-                    title=task_payload["title"],
-                    description=task_payload.get("description"),
-                    status=TaskStatus.PENDING,
-                    priority=task_payload.get("priority", TaskPriority.MEDIUM),
-                    assignee_user_id=task_payload.get("assignee_user_id"),
-                    assignee_role_id=task_payload.get("assignee_role_id"),
-                    requires_evidence=task_payload.get("requires_evidence", False),
-                    requires_approval=task_payload.get("requires_approval", False),
+        try:
+            project = self._create_project(data, commit=False)
+            for task_payload in self._payload_list(template.payload_json.get("tasks")):
+                self._validate_task_payload_refs(task_payload, data.company_id)
+                self.tasks.create(
+                    TaskCreate(
+                        company_id=data.company_id,
+                        project_id=project.id,
+                        process_step_id=task_payload.get("process_step_id"),
+                        title=task_payload["title"],
+                        description=task_payload.get("description"),
+                        status=TaskStatus.PENDING,
+                        priority=task_payload.get("priority", TaskPriority.MEDIUM),
+                        assignee_user_id=task_payload.get("assignee_user_id"),
+                        assignee_role_id=task_payload.get("assignee_role_id"),
+                        requires_evidence=task_payload.get("requires_evidence", False),
+                        requires_approval=task_payload.get("requires_approval", False),
+                    ),
+                    commit=False,
                 )
-            )
 
-        self._record_project_audit(
-            "project.created_from_template",
-            project,
-            f"Project created from template {template.name}",
-            {"template_id": template.id, "template_type": template.template_type.value},
-        )
-        return project
+            self._record_project_audit(
+                "project.created_from_template",
+                project,
+                f"Project created from template {template.name}",
+                {"template_id": template.id, "template_type": template.template_type.value},
+                commit=False,
+            )
+            self.db.commit()
+            self.db.refresh(project)
+            return project
+        except Exception:
+            self.db.rollback()
+            raise
 
     def _create_project(
         self,
         data: ProjectFromTemplateCreate,
         process_id: str | None = None,
+        commit: bool = True,
     ) -> Project:
         return self.projects.create(
             ProjectCreate(
@@ -268,10 +301,16 @@ class TemplateService:
                 due_date=data.due_date,
                 owner_user_id=data.owner_user_id,
                 process_id=process_id,
-            )
+            ),
+            commit=commit,
         )
 
-    def _generate_tasks_from_process(self, project: Project, process_id: str) -> None:
+    def _generate_tasks_from_process(
+        self,
+        project: Project,
+        process_id: str,
+        commit: bool = True,
+    ) -> None:
         process_steps = self.process_steps.list(
             company_id=project.company_id,
             process_id=process_id,
@@ -288,7 +327,8 @@ class TemplateService:
                     assignee_role_id=process_step.responsible_role_id,
                     requires_evidence=process_step.requires_evidence,
                     requires_approval=process_step.requires_approval,
-                )
+                ),
+                commit=commit,
             )
 
     def _payload_list(self, value: Any) -> list[dict[str, Any]]:
@@ -322,6 +362,51 @@ class TemplateService:
             "requires_approval": task.requires_approval,
         }
 
+    def _validate_process_step_payload_refs(
+        self,
+        step_payload: dict[str, Any],
+        company_id: str,
+    ) -> None:
+        self.reference_validator.ensure_user_matches_company(
+            step_payload.get("responsible_user_id"),
+            company_id,
+            "responsible_user_id",
+        )
+        self.reference_validator.ensure_role_matches_company(
+            step_payload.get("responsible_role_id"),
+            company_id,
+            "responsible_role_id",
+        )
+
+    def _validate_task_payload_refs(
+        self,
+        task_payload: dict[str, Any],
+        company_id: str,
+    ) -> None:
+        process_step_id = task_payload.get("process_step_id")
+        if process_step_id is not None:
+            process_step = self.process_steps.get(process_step_id)
+            if process_step is None:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail={"message": "process_step_id does not reference an existing process step"},
+                )
+            if process_step.company_id != company_id:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail={"message": "process_step_id belongs to a different company"},
+                )
+        self.reference_validator.ensure_user_matches_company(
+            task_payload.get("assignee_user_id"),
+            company_id,
+            "assignee_user_id",
+        )
+        self.reference_validator.ensure_role_matches_company(
+            task_payload.get("assignee_role_id"),
+            company_id,
+            "assignee_role_id",
+        )
+
     def _record_template_audit(self, action: str, template: Template, summary: str) -> None:
         self.audit_logs.create(
             AuditLogCreate(
@@ -343,6 +428,7 @@ class TemplateService:
         project: Project,
         summary: str,
         after_data: dict[str, Any],
+        commit: bool = True,
     ) -> None:
         self.audit_logs.create(
             AuditLogCreate(
@@ -352,5 +438,6 @@ class TemplateService:
                 target_id=project.id,
                 summary=summary,
                 after_data_json=after_data,
-            )
+            ),
+            commit=commit,
         )

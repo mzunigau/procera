@@ -7,8 +7,10 @@ from fastapi import HTTPException, status
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
+from app.core.reference_validation import ReferenceValidator
 from app.modules.audit.schemas import AuditLogCreate
 from app.modules.audit.service import AuditLogService
+from app.modules.process_steps.repository import ProcessStepRepository
 from app.modules.projects.repository import ProjectRepository
 from app.modules.tasks.models import Task, TaskAttachment, TaskComment, TaskStatus
 from app.modules.tasks.repository import (
@@ -41,7 +43,9 @@ class TaskService:
         self.attachment_repository = TaskAttachmentRepository(db)
         self.comment_repository = TaskCommentRepository(db)
         self.project_repository = ProjectRepository(db)
+        self.process_step_repository = ProcessStepRepository(db)
         self.audit_log_service = AuditLogService(db)
+        self.reference_validator = ReferenceValidator(db)
 
     def list_tasks(
         self,
@@ -60,8 +64,15 @@ class TaskService:
         return task
 
     def create_task(self, data: TaskCreate) -> Task:
-        self._ensure_project_exists(data.project_id)
+        self._ensure_project_matches_company(data.project_id, data.company_id)
         self._apply_assigned_to(data)
+        self._validate_task_references(
+            company_id=data.company_id,
+            process_step_id=data.process_step_id,
+            parent_task_id=data.parent_task_id,
+            assignee_user_id=data.assignee_user_id,
+            assignee_role_id=data.assignee_role_id,
+        )
         task = self.repository.create(data)
         self.audit_log_service.record(
             AuditLogCreate(
@@ -79,10 +90,35 @@ class TaskService:
         task = self.get_task(task_id)
         before_data = self._task_audit_data(task)
         if data.project_id is not None:
-            self._ensure_project_exists(data.project_id)
+            self._ensure_project_matches_company(data.project_id, task.company_id)
         if data.status is not None:
             self._validate_status_transition(task.status, data.status)
         self._apply_assigned_to(data)
+        self._validate_task_references(
+            company_id=task.company_id,
+            process_step_id=(
+                data.process_step_id
+                if "process_step_id" in data.model_fields_set
+                else None
+            ),
+            parent_task_id=(
+                data.parent_task_id
+                if "parent_task_id" in data.model_fields_set
+                else None
+            ),
+            assignee_user_id=(
+                data.assignee_user_id
+                if "assignee_user_id" in data.model_fields_set
+                or "assigned_to" in data.model_fields_set
+                else None
+            ),
+            assignee_role_id=(
+                data.assignee_role_id
+                if "assignee_role_id" in data.model_fields_set
+                or "assigned_to" in data.model_fields_set
+                else None
+            ),
+        )
         updated_task = self.repository.update(task, data)
         after_data = self._task_audit_data(updated_task)
         self._record_task_update_audit(updated_task, data, before_data, after_data)
@@ -122,6 +158,11 @@ class TaskService:
                 detail={"message": "Task belongs to a different company"},
             )
         data.task_id = task_id
+        self.reference_validator.ensure_user_matches_company(
+            data.uploaded_by_user_id,
+            data.company_id,
+            "uploaded_by_user_id",
+        )
         return self.attachment_repository.create(data)
 
     def upload_task_attachment(
@@ -137,6 +178,11 @@ class TaskService:
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail={"message": "Task belongs to a different company"},
             )
+        self.reference_validator.ensure_user_matches_company(
+            uploaded_by_user_id,
+            company_id,
+            "uploaded_by_user_id",
+        )
 
         upload_dir = Path(settings.upload_storage_path) / "task_attachments" / task_id
         upload_dir.mkdir(parents=True, exist_ok=True)
@@ -165,6 +211,12 @@ class TaskService:
         data: TaskAttachmentUpdate,
     ) -> TaskAttachment:
         attachment = self.get_task_attachment(attachment_id)
+        if "uploaded_by_user_id" in data.model_fields_set:
+            self.reference_validator.ensure_user_matches_company(
+                data.uploaded_by_user_id,
+                attachment.company_id,
+                "uploaded_by_user_id",
+            )
         return self.attachment_repository.update(attachment, data)
 
     def delete_task_attachment(self, attachment_id: str) -> None:
@@ -201,6 +253,11 @@ class TaskService:
                 detail={"message": "Task belongs to a different company"},
             )
         data.task_id = task_id
+        self.reference_validator.ensure_user_matches_company(
+            data.author_user_id,
+            data.company_id,
+            "author_user_id",
+        )
         return self.comment_repository.create(data)
 
     def update_task_comment(
@@ -209,17 +266,29 @@ class TaskService:
         data: TaskCommentUpdate,
     ) -> TaskComment:
         comment = self.get_task_comment(comment_id)
+        if "author_user_id" in data.model_fields_set:
+            self.reference_validator.ensure_user_matches_company(
+                data.author_user_id,
+                comment.company_id,
+                "author_user_id",
+            )
         return self.comment_repository.update(comment, data)
 
     def delete_task_comment(self, comment_id: str) -> None:
         comment = self.get_task_comment(comment_id)
         self.comment_repository.delete(comment)
 
-    def _ensure_project_exists(self, project_id: str) -> None:
-        if self.project_repository.get(project_id) is None:
+    def _ensure_project_matches_company(self, project_id: str, company_id: str) -> None:
+        project = self.project_repository.get(project_id)
+        if project is None:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail={"message": "Project does not exist"},
+            )
+        if project.company_id != company_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={"message": "Project belongs to a different company"},
             )
 
     def _apply_assigned_to(self, data: TaskCreate | TaskUpdate) -> None:
@@ -235,6 +304,65 @@ class TaskService:
             return
         data.assignee_user_id = None
         data.assignee_role_id = data.assigned_to.id
+
+    def _validate_task_references(
+        self,
+        company_id: str,
+        process_step_id: str | None,
+        parent_task_id: str | None,
+        assignee_user_id: str | None,
+        assignee_role_id: str | None,
+    ) -> None:
+        self._ensure_process_step_matches_company(process_step_id, company_id)
+        self._ensure_parent_task_matches_company(parent_task_id, company_id)
+        self.reference_validator.ensure_user_matches_company(
+            assignee_user_id,
+            company_id,
+            "assignee_user_id",
+        )
+        self.reference_validator.ensure_role_matches_company(
+            assignee_role_id,
+            company_id,
+            "assignee_role_id",
+        )
+
+    def _ensure_process_step_matches_company(
+        self,
+        process_step_id: str | None,
+        company_id: str,
+    ) -> None:
+        if process_step_id is None:
+            return
+        process_step = self.process_step_repository.get(process_step_id)
+        if process_step is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={"message": "process_step_id does not reference an existing process step"},
+            )
+        if process_step.company_id != company_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={"message": "process_step_id belongs to a different company"},
+            )
+
+    def _ensure_parent_task_matches_company(
+        self,
+        parent_task_id: str | None,
+        company_id: str,
+    ) -> None:
+        if parent_task_id is None:
+            return
+        parent_task = self.repository.get(parent_task_id)
+        if parent_task is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={"message": "parent_task_id does not reference an existing task"},
+            )
+        if parent_task.company_id != company_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={"message": "parent_task_id belongs to a different company"},
+            )
 
     def _validate_status_transition(
         self,

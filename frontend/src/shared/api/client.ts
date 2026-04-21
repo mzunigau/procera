@@ -8,11 +8,30 @@ export class ApiError extends Error {
 }
 
 const API_BASE_URL = "/api";
+const DEFAULT_COMPANY_ID = "company-1";
+
+export function getRequestContextHeaders() {
+  const headers: Record<string, string> = {
+    "X-Procera-Company-Id": DEFAULT_COMPANY_ID
+  };
+
+  if (typeof window !== "undefined") {
+    const companyId = window.localStorage.getItem("procera_company_id");
+    const userId = window.localStorage.getItem("procera_user_id");
+    headers["X-Procera-Company-Id"] = companyId || DEFAULT_COMPANY_ID;
+    if (userId) {
+      headers["X-Procera-User-Id"] = userId;
+    }
+  }
+
+  return headers;
+}
 
 async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   const response = await fetch(`${API_BASE_URL}${path}`, {
     headers: {
       "Content-Type": "application/json",
+      ...getRequestContextHeaders(),
       ...options.headers
     },
     ...options

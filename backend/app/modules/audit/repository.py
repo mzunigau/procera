@@ -30,9 +30,12 @@ class AuditLogRepository:
     def get(self, audit_log_id: str) -> AuditLog | None:
         return self.db.get(AuditLog, audit_log_id)
 
-    def create(self, data: AuditLogCreate) -> AuditLog:
+    def create(self, data: AuditLogCreate, commit: bool = True) -> AuditLog:
         audit_log = AuditLog(**data.model_dump())
         self.db.add(audit_log)
-        self.db.commit()
+        if commit:
+            self.db.commit()
+        else:
+            self.db.flush()
         self.db.refresh(audit_log)
         return audit_log

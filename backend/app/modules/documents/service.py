@@ -6,6 +6,7 @@ from fastapi import HTTPException, UploadFile, status
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
+from app.core.reference_validation import ReferenceValidator
 from app.modules.documents.models import Document
 from app.modules.documents.repository import (
     DocumentLinkRepository,
@@ -32,6 +33,7 @@ class DocumentService:
         self.processes = ProcessRepository(db)
         self.process_steps = ProcessStepRepository(db)
         self.tasks = TaskRepository(db)
+        self.reference_validator = ReferenceValidator(db)
 
     def list_documents(self, company_id: str | None = None) -> list[Document]:
         return self.documents.list(company_id=company_id)
@@ -46,10 +48,21 @@ class DocumentService:
         return document
 
     def create_document(self, data: DocumentCreate) -> Document:
+        self.reference_validator.ensure_user_matches_company(
+            data.owner_user_id,
+            data.company_id,
+            "owner_user_id",
+        )
         return self.documents.create(data)
 
     def update_document(self, document_id: str, data: DocumentUpdate) -> Document:
         document = self.get_document(document_id)
+        if "owner_user_id" in data.model_fields_set:
+            self.reference_validator.ensure_user_matches_company(
+                data.owner_user_id,
+                document.company_id,
+                "owner_user_id",
+            )
         return self.documents.update(document, data)
 
     def list_document_versions(self, document_id: str):
@@ -70,6 +83,11 @@ class DocumentService:
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail={"message": "Document belongs to a different company"},
             )
+        self.reference_validator.ensure_user_matches_company(
+            created_by_user_id,
+            company_id,
+            "created_by_user_id",
+        )
 
         upload_dir = Path(settings.upload_storage_path) / "documents" / document.id
         upload_dir.mkdir(parents=True, exist_ok=True)
@@ -97,6 +115,7 @@ class DocumentService:
 
     def list_document_links(
         self,
+        company_id: str | None = None,
         document_id: str | None = None,
         linked_type: str | None = None,
         linked_id: str | None = None,
@@ -104,6 +123,7 @@ class DocumentService:
         if document_id:
             self.get_document(document_id)
         return self.links.list(
+            company_id=company_id,
             document_id=document_id,
             linked_type=linked_type,
             linked_id=linked_id,
@@ -145,6 +165,16 @@ class DocumentService:
                     detail={"message": "linked_type, linked_id, and relation_type are required together"},
                 )
             self._ensure_link_target_matches_company(linked_type, linked_id, company_id)
+        self.reference_validator.ensure_user_matches_company(
+            owner_user_id,
+            company_id,
+            "owner_user_id",
+        )
+        self.reference_validator.ensure_user_matches_company(
+            created_by_user_id,
+            company_id,
+            "created_by_user_id",
+        )
 
         document = self.documents.create(
             DocumentCreate(

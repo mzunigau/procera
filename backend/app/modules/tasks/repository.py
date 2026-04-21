@@ -31,10 +31,13 @@ class TaskRepository:
     def get(self, task_id: str) -> Task | None:
         return self.db.get(Task, task_id)
 
-    def create(self, data: TaskCreate) -> Task:
+    def create(self, data: TaskCreate, commit: bool = True) -> Task:
         task = Task(**data.model_dump(exclude={"assigned_to"}))
         self.db.add(task)
-        self.db.commit()
+        if commit:
+            self.db.commit()
+        else:
+            self.db.flush()
         self.db.refresh(task)
         return task
 

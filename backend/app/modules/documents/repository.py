@@ -68,11 +68,14 @@ class DocumentLinkRepository:
 
     def list(
         self,
+        company_id: str | None = None,
         document_id: str | None = None,
         linked_type: str | None = None,
         linked_id: str | None = None,
     ) -> list[DocumentLink]:
         query = select(DocumentLink).order_by(DocumentLink.created_at.desc())
+        if company_id:
+            query = query.where(DocumentLink.company_id == company_id)
         if document_id:
             query = query.where(DocumentLink.document_id == document_id)
         if linked_type:

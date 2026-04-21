@@ -15,6 +15,7 @@ from app.modules.process_steps.api import router as process_steps_router
 from app.modules.processes.api import router as processes_router
 from app.modules.projects.api import router as projects_router
 from app.modules.tasks.api import router as tasks_router
+from app.modules.users.api import router as users_router
 
 
 @contextmanager
@@ -36,6 +37,7 @@ def build_client() -> Generator[TestClient, None, None]:
     app.include_router(projects_router)
     app.include_router(tasks_router)
     app.include_router(documents_router)
+    app.include_router(users_router)
 
     def override_get_db() -> Generator[Session, None, None]:
         db = TestingSessionLocal()
@@ -55,8 +57,25 @@ def build_client() -> Generator[TestClient, None, None]:
         storage_directory.cleanup()
 
 
+def create_user(client: TestClient, email: str = "person@example.com") -> str:
+    response = client.post(
+        "/users",
+        json={
+            "company_id": "company-1",
+            "first_name": "Procera",
+            "last_name": "User",
+            "email": email,
+            "password_hash": "hash",
+            "status": "active",
+        },
+    )
+    assert response.status_code == 201
+    return response.json()["id"]
+
+
 def test_document_upload_list_and_consult_linked_to_process() -> None:
     with build_client() as client:
+        user_id = create_user(client)
         process_response = client.post(
             "/processes",
             json={
@@ -75,7 +94,7 @@ def test_document_upload_list_and_consult_linked_to_process() -> None:
                 "title": "Operating Procedure",
                 "document_type": "procedure",
                 "category": "operations",
-                "created_by_user_id": "user-1",
+                "created_by_user_id": user_id,
                 "change_summary": "Initial version",
                 "linked_type": "process",
                 "linked_id": process_id,
@@ -208,6 +227,7 @@ def test_document_can_link_to_process_step_and_task() -> None:
 
 def test_document_can_have_multiple_versions_and_current_version_updates() -> None:
     with build_client() as client:
+        user_id = create_user(client)
         uploaded = client.post(
             "/documents/upload",
             data={
@@ -226,7 +246,7 @@ def test_document_can_have_multiple_versions_and_current_version_updates() -> No
             f"/documents/{document_id}/versions/upload",
             data={
                 "company_id": "company-1",
-                "created_by_user_id": "user-2",
+                "created_by_user_id": user_id,
                 "change_summary": "Updated procedure",
             },
             files={"file": ("procedure-v2.txt", b"version two", "text/plain")},
@@ -273,3 +293,20 @@ def test_document_link_rejects_unknown_target_type() -> None:
         )
         assert link.status_code == 400
         assert link.json()["detail"]["message"] == "linked_type must be process, process_step, or task"
+
+
+def test_document_rejects_missing_owner_reference() -> None:
+    with build_client() as client:
+        document_response = client.post(
+            "/documents",
+            json={
+                "company_id": "company-1",
+                "title": "Owned Manual",
+                "document_type": "manual",
+                "owner_user_id": "missing-user",
+            },
+        )
+        assert document_response.status_code == 400
+        assert document_response.json()["detail"]["message"] == (
+            "owner_user_id does not reference an existing user"
+        )

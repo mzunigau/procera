@@ -11,12 +11,16 @@ from app.core.database import Base, get_db
 from app.modules.process_steps.api import router as process_steps_router
 from app.modules.processes.api import router as processes_router
 from app.modules.projects.api import router as projects_router
+from app.modules.roles.api import router as roles_router
 from app.modules.tasks.api import router as tasks_router
+from app.modules.tasks.repository import TaskRepository
 from app.modules.templates.api import router as templates_router
 
 
 @contextmanager
-def build_client() -> Generator[TestClient, None, None]:
+def build_client(
+    raise_server_exceptions: bool = True,
+) -> Generator[TestClient, None, None]:
     engine = create_engine(
         "sqlite://",
         connect_args={"check_same_thread": False},
@@ -30,6 +34,7 @@ def build_client() -> Generator[TestClient, None, None]:
     app.include_router(process_steps_router)
     app.include_router(tasks_router)
     app.include_router(templates_router)
+    app.include_router(roles_router)
 
     def override_get_db() -> Generator[Session, None, None]:
         db = TestingSessionLocal()
@@ -40,15 +45,29 @@ def build_client() -> Generator[TestClient, None, None]:
 
     app.dependency_overrides[get_db] = override_get_db
     try:
-        with TestClient(app) as client:
+        with TestClient(app, raise_server_exceptions=raise_server_exceptions) as client:
             yield client
     finally:
         app.dependency_overrides.clear()
         Base.metadata.drop_all(bind=engine)
 
 
+def create_role(client: TestClient, name: str) -> str:
+    response = client.post(
+        "/roles",
+        json={
+            "company_id": "company-1",
+            "name": name,
+            "description": "Test role",
+        },
+    )
+    assert response.status_code == 201
+    return response.json()["id"]
+
+
 def test_process_template_can_create_project_with_generated_tasks() -> None:
     with build_client() as client:
+        reviewer_role_id = create_role(client, "Purchase Reviewer")
         process_response = client.post(
             "/processes",
             json={
@@ -68,7 +87,7 @@ def test_process_template_can_create_project_with_generated_tasks() -> None:
                 "step_order": 1,
                 "name": "Review purchase request",
                 "description": "Validate budget and supplier.",
-                "responsible_role_id": "role-reviewer",
+                "responsible_role_id": reviewer_role_id,
                 "requires_evidence": True,
                 "requires_approval": True,
             },
@@ -106,13 +125,14 @@ def test_process_template_can_create_project_with_generated_tasks() -> None:
         assert len(tasks) == 1
         assert tasks[0]["title"] == "Review purchase request"
         assert tasks[0]["process_step_id"] != source_step_id
-        assert tasks[0]["assignee_role_id"] == "role-reviewer"
+        assert tasks[0]["assignee_role_id"] == reviewer_role_id
         assert tasks[0]["requires_evidence"] is True
         assert tasks[0]["requires_approval"] is True
 
 
 def test_project_template_can_create_project_with_task_structure() -> None:
     with build_client() as client:
+        accounting_role_id = create_role(client, "Accounting")
         project_response = client.post(
             "/projects",
             json={
@@ -133,7 +153,7 @@ def test_project_template_can_create_project_with_task_structure() -> None:
                 "description": "Compare bank statements with ledger.",
                 "status": "in_progress",
                 "priority": "high",
-                "assigned_to": {"type": "role", "id": "role-accounting"},
+                "assigned_to": {"type": "role", "id": accounting_role_id},
                 "requires_evidence": True,
                 "requires_approval": False,
             },
@@ -170,4 +190,68 @@ def test_project_template_can_create_project_with_task_structure() -> None:
         assert tasks[0]["title"] == "Reconcile bank accounts"
         assert tasks[0]["status"] == "pending"
         assert tasks[0]["priority"] == "high"
-        assert tasks[0]["assignee_role_id"] == "role-accounting"
+        assert tasks[0]["assignee_role_id"] == accounting_role_id
+
+
+def test_process_template_project_creation_rolls_back_partial_records(
+    monkeypatch,
+) -> None:
+    original_create = TaskRepository.create
+
+    def fail_task_creation(self, data, commit=True):
+        if data.title == "Explode":
+            raise RuntimeError("task generation failed")
+        return original_create(self, data, commit=commit)
+
+    monkeypatch.setattr(TaskRepository, "create", fail_task_creation)
+
+    with build_client(raise_server_exceptions=False) as client:
+        process_response = client.post(
+            "/processes",
+            json={
+                "company_id": "company-1",
+                "name": "Source process",
+                "status": "published",
+            },
+        )
+        assert process_response.status_code == 201
+        process_id = process_response.json()["id"]
+
+        step_response = client.post(
+            f"/processes/{process_id}/steps",
+            json={
+                "company_id": "company-1",
+                "process_id": process_id,
+                "step_order": 1,
+                "name": "Explode",
+            },
+        )
+        assert step_response.status_code == 201
+
+        template_response = client.post(
+            f"/templates/from-process/{process_id}",
+            json={
+                "company_id": "company-1",
+                "name": "Rollback template",
+            },
+        )
+        assert template_response.status_code == 201
+        template_id = template_response.json()["id"]
+
+        project_response = client.post(
+            f"/templates/{template_id}/projects",
+            json={
+                "company_id": "company-1",
+                "name": "Project that should roll back",
+            },
+        )
+        assert project_response.status_code == 500
+
+        projects_response = client.get("/projects")
+        assert projects_response.status_code == 200
+        assert projects_response.json() == []
+
+        processes_response = client.get("/processes")
+        assert processes_response.status_code == 200
+        assert len(processes_response.json()) == 1
+        assert processes_response.json()[0]["id"] == process_id

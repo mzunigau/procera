@@ -29,10 +29,13 @@ class ProcessStepRepository:
     def get(self, process_step_id: str) -> ProcessStep | None:
         return self.db.get(ProcessStep, process_step_id)
 
-    def create(self, data: ProcessStepCreate) -> ProcessStep:
+    def create(self, data: ProcessStepCreate, commit: bool = True) -> ProcessStep:
         process_step = ProcessStep(**data.model_dump())
         self.db.add(process_step)
-        self.db.commit()
+        if commit:
+            self.db.commit()
+        else:
+            self.db.flush()
         self.db.refresh(process_step)
         return process_step
 

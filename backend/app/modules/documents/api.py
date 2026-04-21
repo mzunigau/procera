@@ -2,6 +2,9 @@ from fastapi import APIRouter, Depends, File, Form, Query, UploadFile, status
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
+from app.core.permissions import require_permission
+from app.core.request_context import RequestContext, ensure_company_access, get_request_context
+from app.modules.roles.permissions import Permission
 from app.modules.documents.schemas import (
     DocumentCreate,
     DocumentLinkCreate,
@@ -25,8 +28,9 @@ def get_document_service(db: Session = Depends(get_db)) -> DocumentService:
 def list_documents(
     company_id: str | None = Query(default=None),
     service: DocumentService = Depends(get_document_service),
+    context: RequestContext = Depends(require_permission(Permission.DOCUMENT_VIEW)),
 ):
-    return service.list_documents(company_id=company_id)
+    return service.list_documents(company_id=context.company_id)
 
 
 @router.get("/links/by-target", response_model=list[DocumentLinkRead])
@@ -34,21 +38,28 @@ def list_document_links_by_target(
     linked_type: str = Query(...),
     linked_id: str = Query(...),
     service: DocumentService = Depends(get_document_service),
+    context: RequestContext = Depends(require_permission(Permission.DOCUMENT_VIEW)),
 ):
-    return service.list_document_links(linked_type=linked_type, linked_id=linked_id)
+    return service.list_document_links(
+        company_id=context.company_id,
+        linked_type=linked_type,
+        linked_id=linked_id,
+    )
 
 
 @router.post("", response_model=DocumentRead, status_code=status.HTTP_201_CREATED)
 def create_document(
     data: DocumentCreate,
     service: DocumentService = Depends(get_document_service),
+    context: RequestContext = Depends(require_permission(Permission.DOCUMENT_MANAGE)),
 ):
+    data.company_id = context.company_id
     return service.create_document(data)
 
 
 @router.post("/upload", response_model=DocumentUploadRead, status_code=status.HTTP_201_CREATED)
 def upload_document(
-    company_id: str = Form(...),
+    company_id: str | None = Form(default=None),
     title: str = Form(...),
     document_type: str = Form(...),
     category: str | None = Form(default=None),
@@ -60,14 +71,15 @@ def upload_document(
     relation_type: str | None = Form(default=None),
     file: UploadFile = File(...),
     service: DocumentService = Depends(get_document_service),
+    context: RequestContext = Depends(require_permission(Permission.DOCUMENT_MANAGE)),
 ):
     return service.upload_document(
-        company_id=company_id,
+        company_id=context.company_id,
         title=title,
         document_type=document_type,
         category=category,
         owner_user_id=owner_user_id,
-        created_by_user_id=created_by_user_id,
+        created_by_user_id=context.user_id or created_by_user_id,
         change_summary=change_summary,
         linked_type=linked_type,
         linked_id=linked_id,
@@ -80,8 +92,11 @@ def upload_document(
 def get_document(
     document_id: str,
     service: DocumentService = Depends(get_document_service),
+    context: RequestContext = Depends(require_permission(Permission.DOCUMENT_VIEW)),
 ):
-    return service.get_document(document_id)
+    document = service.get_document(document_id)
+    ensure_company_access(document, context)
+    return document
 
 
 @router.patch("/{document_id}", response_model=DocumentRead)
@@ -89,7 +104,9 @@ def update_document(
     document_id: str,
     data: DocumentUpdate,
     service: DocumentService = Depends(get_document_service),
+    context: RequestContext = Depends(require_permission(Permission.DOCUMENT_MANAGE)),
 ):
+    ensure_company_access(service.get_document(document_id), context)
     return service.update_document(document_id, data)
 
 
@@ -97,7 +114,9 @@ def update_document(
 def list_document_versions(
     document_id: str,
     service: DocumentService = Depends(get_document_service),
+    context: RequestContext = Depends(require_permission(Permission.DOCUMENT_VIEW)),
 ):
+    ensure_company_access(service.get_document(document_id), context)
     return service.list_document_versions(document_id)
 
 
@@ -108,16 +127,17 @@ def list_document_versions(
 )
 def upload_document_version(
     document_id: str,
-    company_id: str = Form(...),
+    company_id: str | None = Form(default=None),
     created_by_user_id: str | None = Form(default=None),
     change_summary: str | None = Form(default=None),
     file: UploadFile = File(...),
     service: DocumentService = Depends(get_document_service),
+    context: RequestContext = Depends(require_permission(Permission.DOCUMENT_MANAGE)),
 ):
     return service.upload_document_version(
         document_id=document_id,
-        company_id=company_id,
-        created_by_user_id=created_by_user_id,
+        company_id=context.company_id,
+        created_by_user_id=context.user_id or created_by_user_id,
         change_summary=change_summary,
         file=file,
     )
@@ -127,8 +147,10 @@ def upload_document_version(
 def list_document_links(
     document_id: str,
     service: DocumentService = Depends(get_document_service),
+    context: RequestContext = Depends(require_permission(Permission.DOCUMENT_VIEW)),
 ):
-    return service.list_document_links(document_id=document_id)
+    ensure_company_access(service.get_document(document_id), context)
+    return service.list_document_links(company_id=context.company_id, document_id=document_id)
 
 
 @router.post("/{document_id}/links", response_model=DocumentLinkRead, status_code=status.HTTP_201_CREATED)
@@ -136,6 +158,8 @@ def link_document(
     document_id: str,
     data: DocumentLinkCreate,
     service: DocumentService = Depends(get_document_service),
+    context: RequestContext = Depends(require_permission(Permission.DOCUMENT_MANAGE)),
 ):
+    data.company_id = context.company_id
     data.document_id = document_id
     return service.link_document(data)

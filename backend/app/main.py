@@ -7,7 +7,10 @@ from app.modules.audit.api import router as audit_router
 from app.modules.documents.api import router as documents_router
 from app.modules.process_steps.api import router as process_steps_router
 from app.modules.processes.api import router as processes_router
-from app.modules.projects.api import router as projects_router
+from app.modules.projects.api import (
+    project_process_instances_router,
+    router as projects_router,
+)
 from app.modules.roles.api import router as roles_router
 from app.modules.tasks.api import router as tasks_router
 from app.modules.templates.api import router as templates_router
@@ -27,6 +30,7 @@ app = FastAPI(
 )
 
 app.include_router(projects_router)
+app.include_router(project_process_instances_router)
 app.include_router(tasks_router)
 app.include_router(processes_router)
 app.include_router(process_steps_router)
